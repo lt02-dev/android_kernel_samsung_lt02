@@ -60,3 +60,4 @@ obj-$(CONFIG_NFC_PN547)	+= pn544.o
 obj-$(CONFIG_SENSORS_K3DH)      += k3dh.o
 obj-$(CONFIG_SENSORS_GP2AP002)  += gp2ap002.o
 obj-$(CONFIG_SENSORS_PAS221)    += pas221.o
+obj-$(CONFIG_UID_CPUTIME) += uid_cputime.o
