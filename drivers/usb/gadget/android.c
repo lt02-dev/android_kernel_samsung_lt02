@@ -383,7 +383,7 @@ static void functionfs_closed_callback(struct ffs_data *ffs)
 	mutex_unlock(&dev->mutex);
 }
 
-static int functionfs_check_dev_callback(const char *dev_name)
+static void *functionfs_acquire_dev_callback(const char *dev_name)
 {
 	return 0;
 }
@@ -439,6 +439,10 @@ static struct android_usb_function marvell_diag_function = {
 	.cleanup	= marvell_diag_function_cleanup,
 	.bind_config	= marvell_diag_function_bind_config,
 };
+
+static void functionfs_release_dev_callback(struct ffs_data *ffs_data)
+{
+}
 
 struct adb_data {
 	bool opened;
