@@ -2,5 +2,5 @@
 # Makefile for sd8xxx
 #
 
-obj-m		+= wlan_src/
-obj-m		+= mbtc_src/
+obj-y		+= wlan_src/
+obj-y		+= mbtc_src/

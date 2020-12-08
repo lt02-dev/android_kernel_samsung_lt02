@@ -1,24 +1,24 @@
 subdir-ccflags-y += -Idrivers/marvell/marvell-telephony/include
 subdir-ccflags-y += -DEXPORT_SYMTAB
 
-obj-m += ccinetdev/
+obj-y += ccinetdev/
 
-obj-m += cidatastub/
+obj-y += cidatastub/
 
-obj-m += cidatatty/
+obj-y += cidatatty/
 
-obj-m += cimodemtty/
+obj-y += cimodemtty/
 
-obj-m += citty/
+obj-y += citty/
 
-obj-m += cp_load/
+obj-y += cp_load/
 
-obj-m += diag/
+obj-y += diag/
 
-obj-m += errorhandler/
+obj-y += errorhandler/
 
-obj-m += hwmap/
+obj-y += hwmap/
 
-obj-m += shmem/
+obj-y += shmem/
 
-obj-m += usim_event/
+obj-y += usim_event/
