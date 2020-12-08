@@ -364,10 +364,10 @@ endif
 
 
 
-obj-m := mlan.o
+obj-y := mlan.o
 mlan-objs := $(MLANOBJS)
 MOALOBJS += mlinux/moal_sdio_mmc.o
-obj-m += sd8xxx.o
+obj-y += sd8xxx.o
 sd8xxx-objs := $(MOALOBJS)
 
 # Otherwise we were called directly from the command line; invoke the kernel build system.
