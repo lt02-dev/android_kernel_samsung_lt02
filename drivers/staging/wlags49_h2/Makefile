@@ -38,7 +38,7 @@ endif
 endif
 
 
-obj-m		+= $(WLNAME).o
+obj-y		+= $(WLNAME).o
 
 $(WLNAME)-y +=	wl_profile.o \
 		wl_wext.o \
