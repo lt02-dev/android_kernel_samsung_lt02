@@ -101,7 +101,7 @@ static int __init ipc_init(void)
 {
 	sem_init();
 	msg_init();
-	shm_init();
+	shm_init_ipc();
 	hotplug_memory_notifier(ipc_memory_callback, IPC_CALLBACK_PRI);
 	register_ipcns_notifier(&init_ipc_ns);
 	return 0;

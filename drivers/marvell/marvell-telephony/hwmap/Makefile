@@ -1,1 +1,1 @@
-obj-m += hwmap.o
+obj-y += hwmap.o

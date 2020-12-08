@@ -1,1 +1,1 @@
-obj-m  += citty.o
+obj-y += citty.o

@@ -29,7 +29,7 @@ TARGET_MODULE := rts5139
 
 EXTRA_CFLAGS := -Idrivers/scsi -I$(PWD)
 
-obj-m += $(TARGET_MODULE).o
+obj-y += $(TARGET_MODULE).o
 
 common-obj := rts51x_transport.o rts51x_scsi.o rts51x_fop.o
 

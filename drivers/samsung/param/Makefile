@@ -11,7 +11,7 @@ ifneq ($(KERNELRELEASE), )
 
 EXTRA_CFLAGS += -I$(PRJROOT)/modules/fsr/Inc
 
-obj-m := $(MOD_NAME).o
+obj-y := $(MOD_NAME).o
 
 else
 
