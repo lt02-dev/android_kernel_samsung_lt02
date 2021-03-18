@@ -36,7 +36,7 @@ static struct ipc_namespace *create_ipc_ns(struct task_struct *tsk,
 
 	sem_init_ns(ns);
 	msg_init_ns(ns);
-	shm_init_ns(ns);
+	shm_init_ipc_ns(ns);
 
 	/*
 	 * msgmni has already been computed for the new ipc ns.
