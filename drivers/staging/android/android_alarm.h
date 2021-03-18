@@ -26,6 +26,7 @@ enum android_alarm_type {
 	ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP,
 	ANDROID_ALARM_ELAPSED_REALTIME,
 	ANDROID_ALARM_SYSTEMTIME,
+	ANDROID_ALARM_POWER_UP,
 
 	ANDROID_ALARM_TYPE_COUNT,
 
@@ -58,5 +59,7 @@ enum android_alarm_return_flags {
 #define ANDROID_ALARM_SET_RTC               _IOW('a', 5, struct timespec)
 #define ANDROID_ALARM_BASE_CMD(cmd)         (cmd & ~(_IOC(0, 0, 0xf0, 0)))
 #define ANDROID_ALARM_IOCTL_TO_TYPE(cmd)    (_IOC_NR(cmd) >> 4)
+int alarm_set_rtc_ring(struct timespec alarm_time);
+int alarm_read_rtc_ring(int *flag, unsigned long *alarm_time);
 
 #endif

@@ -292,7 +292,8 @@ struct l2cap_chan *l2cap_chan_create(struct sock *sk)
 void l2cap_chan_destroy(struct l2cap_chan *chan)
 {
 	write_lock(&chan_list_lock);
-	list_del(&chan->global_l);
+	if ((&(chan->global_l))->prev != LIST_POISON2)
+		list_del(&chan->global_l);
 	write_unlock(&chan_list_lock);
 
 	l2cap_chan_put(chan);

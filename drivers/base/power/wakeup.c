@@ -127,6 +127,8 @@ EXPORT_SYMBOL_GPL(wakeup_source_destroy);
  */
 void wakeup_source_add(struct wakeup_source *ws)
 {
+	unsigned long flags;
+
 	if (WARN_ON(!ws))
 		return;
 
@@ -135,9 +137,9 @@ void wakeup_source_add(struct wakeup_source *ws)
 	ws->active = false;
 	ws->last_time = ktime_get();
 
-	spin_lock_irq(&events_lock);
+	spin_lock_irqsave(&events_lock, flags);
 	list_add_rcu(&ws->entry, &wakeup_sources);
-	spin_unlock_irq(&events_lock);
+	spin_unlock_irqrestore(&events_lock, flags);
 }
 EXPORT_SYMBOL_GPL(wakeup_source_add);
 
@@ -147,12 +149,14 @@ EXPORT_SYMBOL_GPL(wakeup_source_add);
  */
 void wakeup_source_remove(struct wakeup_source *ws)
 {
+	unsigned long flags;
+
 	if (WARN_ON(!ws))
 		return;
 
-	spin_lock_irq(&events_lock);
+	spin_lock_irqsave(&events_lock, flags);
 	list_del_rcu(&ws->entry);
-	spin_unlock_irq(&events_lock);
+	spin_unlock_irqrestore(&events_lock, flags);
 	synchronize_rcu();
 }
 EXPORT_SYMBOL_GPL(wakeup_source_remove);
@@ -649,6 +653,31 @@ void pm_wakeup_event(struct device *dev, unsigned int msec)
 }
 EXPORT_SYMBOL_GPL(pm_wakeup_event);
 
+static void print_active_wakeup_sources(void)
+{
+	struct wakeup_source *ws;
+	int active = 0;
+	struct wakeup_source *last_activity_ws = NULL;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
+		if (ws->active) {
+			pr_info("active wakeup source: %s\n", ws->name);
+			active = 1;
+		} else if (!active &&
+			   (!last_activity_ws ||
+			    ktime_to_ns(ws->last_time) >
+			    ktime_to_ns(last_activity_ws->last_time))) {
+			last_activity_ws = ws;
+		}
+	}
+
+	if (!active && last_activity_ws)
+		pr_info("last active wakeup source: %s\n",
+			last_activity_ws->name);
+	rcu_read_unlock();
+}
+
 /**
  * pm_wakeup_pending - Check if power transition in progress should be aborted.
  *
@@ -671,6 +700,10 @@ bool pm_wakeup_pending(void)
 		events_check_enabled = !ret;
 	}
 	spin_unlock_irqrestore(&events_lock, flags);
+
+	if (ret)
+		print_active_wakeup_sources();
+
 	return ret;
 }
 
@@ -723,15 +756,16 @@ bool pm_get_wakeup_count(unsigned int *count, bool block)
 bool pm_save_wakeup_count(unsigned int count)
 {
 	unsigned int cnt, inpr;
+	unsigned long flags;
 
 	events_check_enabled = false;
-	spin_lock_irq(&events_lock);
+	spin_lock_irqsave(&events_lock, flags);
 	split_counters(&cnt, &inpr);
 	if (cnt == count && inpr == 0) {
 		saved_count = count;
 		events_check_enabled = true;
 	}
-	spin_unlock_irq(&events_lock);
+	spin_unlock_irqrestore(&events_lock, flags);
 	return events_check_enabled;
 }
 
@@ -802,10 +836,10 @@ static int print_wakeup_source_stats(struct seq_file *m,
 		active_time = ktime_set(0, 0);
 	}
 
-	ret = seq_printf(m, "%-12s\t%lu\t\t%lu\t\t%lu\t\t%lu\t\t"
+	ret = seq_printf(m, "%-12s\t%d\t%lu\t\t%lu\t\t%lu\t\t%lu\t\t"
 			"%lld\t\t%lld\t\t%lld\t\t%lld\t\t%lld\n",
-			ws->name, active_count, ws->event_count,
-			ws->wakeup_count, ws->expire_count,
+			ws->name, (ws->active) ? 1 : 0, active_count,
+			ws->event_count, ws->wakeup_count, ws->expire_count,
 			ktime_to_ms(active_time), ktime_to_ms(total_time),
 			ktime_to_ms(max_time), ktime_to_ms(ws->last_time),
 			ktime_to_ms(prevent_sleep_time));
@@ -813,6 +847,17 @@ static int print_wakeup_source_stats(struct seq_file *m,
 	spin_unlock_irqrestore(&ws->lock, flags);
 
 	return ret;
+}
+
+void print_active_wakeup_events(void)
+{
+	struct wakeup_source *ws;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(ws, &wakeup_sources, entry)
+		if (ws->active)
+			pr_info("Active wakeup event %s\n", ws->name);
+	rcu_read_unlock();
 }
 
 /**
@@ -823,9 +868,9 @@ static int wakeup_sources_stats_show(struct seq_file *m, void *unused)
 {
 	struct wakeup_source *ws;
 
-	seq_puts(m, "name\t\tactive_count\tevent_count\twakeup_count\t"
-		"expire_count\tactive_since\ttotal_time\tmax_time\t"
-		"last_change\tprevent_suspend_time\n");
+	seq_puts(m, "name\t\tcurrent_active\tactive_count\tevent_count\t"
+		"wakeup_count\texpire_count\tactive_since\ttotal_time\t"
+		"max_time\tlast_change\tprevent_suspend_time\n");
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(ws, &wakeup_sources, entry)

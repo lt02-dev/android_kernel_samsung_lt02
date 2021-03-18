@@ -23,16 +23,20 @@
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/sched.h>
+#include <linux/wakelock.h>
 #include <linux/types.h>
 #include <linux/device.h>
 #include <linux/miscdevice.h>
 
+#include <linux/mutex.h>
 #define ADB_BULK_BUFFER_SIZE           4096
 
 /* number of tx requests to allocate */
 #define TX_REQ_MAX 4
+#define RX_REQ_MAX 32
 
 static const char adb_shortname[] = "android_adb";
+//static struct wake_lock adb_idle_wake_lock;
 
 struct adb_dev {
 	struct usb_function function;
@@ -42,19 +46,26 @@ struct adb_dev {
 	struct usb_ep *ep_in;
 	struct usb_ep *ep_out;
 
-	int online;
-	int error;
+	atomic_t online;
+	atomic_t error;
 
 	atomic_t read_excl;
 	atomic_t write_excl;
 	atomic_t open_excl;
 
 	struct list_head tx_idle;
+	struct list_head rx_idle;
+	struct list_head rx_done;
 
 	wait_queue_head_t read_wq;
 	wait_queue_head_t write_wq;
+
+	/* the request we're currently reading from */
 	struct usb_request *rx_req;
-	int rx_done;
+	unsigned char *read_buf;
+	unsigned read_count;
+
+	int maxsize;
 };
 
 static struct usb_interface_descriptor adb_interface_desc = {
@@ -130,7 +141,11 @@ static struct usb_request *adb_request_new(struct usb_ep *ep, int buffer_size)
 		return NULL;
 
 	/* now allocate buffers for the requests */
+#ifdef CONFIG_PXA910_1G_DDR_WORKAROUND
+	req->buf = kmalloc(buffer_size, GFP_KERNEL | GFP_DMA);
+#else
 	req->buf = kmalloc(buffer_size, GFP_KERNEL);
+#endif
 	if (!req->buf) {
 		usb_ep_free_request(ep, req);
 		return NULL;
@@ -195,7 +210,7 @@ static void adb_complete_in(struct usb_ep *ep, struct usb_request *req)
 	struct adb_dev *dev = _adb_dev;
 
 	if (req->status != 0)
-		dev->error = 1;
+		atomic_set(&dev->error, 1);
 
 	adb_req_put(dev, &dev->tx_idle, req);
 
@@ -206,10 +221,14 @@ static void adb_complete_out(struct usb_ep *ep, struct usb_request *req)
 {
 	struct adb_dev *dev = _adb_dev;
 
-	dev->rx_done = 1;
 	if (req->status != 0 && req->status != -ECONNRESET)
-		dev->error = 1;
-
+	{
+		atomic_set(&dev->error, 1);
+		adb_req_put(dev, &dev->rx_idle, req);
+	} else
+	{
+		adb_req_put(dev, &dev->rx_done, req);
+	}
 	wake_up(&dev->read_wq);
 }
 
@@ -243,11 +262,13 @@ static int adb_create_bulk_endpoints(struct adb_dev *dev,
 	dev->ep_out = ep;
 
 	/* now allocate requests for our endpoints */
-	req = adb_request_new(dev->ep_out, ADB_BULK_BUFFER_SIZE);
+	for (i = 0; i < RX_REQ_MAX; i++) {
+		req = adb_request_new(dev->ep_out, 512);
 	if (!req)
 		goto fail;
 	req->complete = adb_complete_out;
-	dev->rx_req = req;
+		adb_req_put(dev, &dev->rx_idle, req);
+	}
 
 	for (i = 0; i < TX_REQ_MAX; i++) {
 		req = adb_request_new(dev->ep_in, ADB_BULK_BUFFER_SIZE);
@@ -283,56 +304,96 @@ static ssize_t adb_read(struct file *fp, char __user *buf,
 		return -EBUSY;
 
 	/* we will block until we're online */
-	while (!(dev->online || dev->error)) {
+	while (!(atomic_read(&dev->online) || atomic_read(&dev->error))) {
 		pr_debug("adb_read: waiting for online state\n");
 		ret = wait_event_interruptible(dev->read_wq,
-				(dev->online || dev->error));
+			(atomic_read(&dev->online) ||
+			atomic_read(&dev->error)));
 		if (ret < 0) {
 			adb_unlock(&dev->read_excl);
 			return ret;
 		}
 	}
-	if (dev->error) {
+	if (atomic_read(&dev->error)) {
 		r = -EIO;
 		goto done;
 	}
+	while (count > 0) {
+		if (atomic_read(&dev->error)) {
+			r = -EIO;
+			break;
+		}
 
+		/* if we have idle read requests, get them queued */
+		while ((req = adb_req_get(dev, &dev->rx_idle))) {
 requeue_req:
-	/* queue a request */
-	req = dev->rx_req;
-	req->length = count;
-	dev->rx_done = 0;
+			req->length = dev->maxsize?dev->maxsize:512;
 	ret = usb_ep_queue(dev->ep_out, req, GFP_ATOMIC);
 	if (ret < 0) {
 		pr_debug("adb_read: failed to queue req %p (%d)\n", req, ret);
 		r = -EIO;
-		dev->error = 1;
+				atomic_set(&dev->error, 1);
+				adb_req_put(dev, &dev->rx_idle, req);
 		goto done;
 	} else {
 		pr_debug("rx %p queue\n", req);
 	}
+		}
+		/* if we have data pending, give it to userspace */
+		if (dev->read_count > 0) {
+			xfer = (dev->read_count < count) ? dev->read_count : count;
+
+			if (copy_to_user(buf, dev->read_buf, xfer)) {
+				r = -EFAULT;
+				break;
+			}
+			dev->read_buf += xfer;
+			dev->read_count -= xfer;
+			buf += xfer;
+			count -= xfer;
+
+			/* if we've emptied the buffer, release the request */
+			if (dev->read_count == 0) {
+				adb_req_put(dev, &dev->rx_idle, dev->rx_req);
+				dev->rx_req = 0;
+			}
+			continue;
+		}
 
 	/* wait for a request to complete */
-	ret = wait_event_interruptible(dev->read_wq, dev->rx_done);
-	if (ret < 0) {
-		if (ret != -ERESTARTSYS)
-			dev->error = 1;
-		r = ret;
-		usb_ep_dequeue(dev->ep_out, req);
-		goto done;
-	}
-	if (!dev->error) {
-		/* If we got a 0-len packet, throw it back and try again. */
+		req = 0;
+		ret = wait_event_interruptible(dev->read_wq,
+				((req = adb_req_get(dev, &dev->rx_done)) || atomic_read(&dev->error)));
+
+		if (req != 0) {
+			/* if we got a 0-len one we need to put it back into
+			** service.  if we made it the current read req we'd
+			** be stuck forever
+			*/
 		if (req->actual == 0)
 			goto requeue_req;
 
 		pr_debug("rx %p %d\n", req, req->actual);
-		xfer = (req->actual < count) ? req->actual : count;
-		if (copy_to_user(buf, req->buf, xfer))
-			r = -EFAULT;
+			dev->rx_req = req;
+			dev->read_count = req->actual;
+			dev->read_buf = req->buf;
+		
+#if 1
+		 pr_debug("Command = %s\n",  strncmp( req->buf, "CLSE",4) == 0 ? "CLSE" : 
+		 								strncmp( req->buf, "OKAY",4) == 0 ? "OKAY" :
+		 								strncmp( req->buf, "OPEN",4) == 0 ? "OPEN" :
+		 								strncmp( req->buf, "SYNC",4) == 0 ? "SYNC" :
+		 								strncmp( req->buf, "CNXN",4) == 0 ? "CNXN" :
+		 								strncmp( req->buf, "WRTE",4) == 0 ? "WRTE" : "????");
+#endif
+		}
 
-	} else
-		r = -EIO;
+		if (ret < 0) {
+			r = ret;
+			pr_debug("adb_read error %d\n",atomic_read(&dev->error));
+			break;
+		}
+	}
 
 done:
 	adb_unlock(&dev->read_excl);
@@ -356,7 +417,7 @@ static ssize_t adb_write(struct file *fp, const char __user *buf,
 		return -EBUSY;
 
 	while (count > 0) {
-		if (dev->error) {
+		if (atomic_read(&dev->error)) {
 			pr_debug("adb_write dev->error\n");
 			r = -EIO;
 			break;
@@ -365,7 +426,7 @@ static ssize_t adb_write(struct file *fp, const char __user *buf,
 		/* get an idle tx request to use */
 		req = 0;
 		ret = wait_event_interruptible(dev->write_wq,
-			(req = adb_req_get(dev, &dev->tx_idle)) || dev->error);
+			(req = adb_req_get(dev, &dev->tx_idle)) || atomic_read(&dev->error));
 
 		if (ret < 0) {
 			r = ret;
@@ -377,6 +438,14 @@ static ssize_t adb_write(struct file *fp, const char __user *buf,
 				xfer = ADB_BULK_BUFFER_SIZE;
 			else
 				xfer = count;
+#if 1
+			pr_debug("Command = %s\n",  strncmp( buf, "CLSE",4) == 0 ? "CLSE" : 
+										   strncmp( buf, "OKAY",4) == 0 ? "OKAY" :
+										   strncmp( buf, "OPEN",4) == 0 ? "OPEN" :
+										   strncmp( buf, "SYNC",4) == 0 ? "SYNC" :
+										   strncmp( buf, "CNXN",4) == 0 ? "CNXN" :
+										   strncmp( buf, "WRTE",4) == 0 ? "WRTE" : "????");
+#endif			
 			if (copy_from_user(req->buf, buf, xfer)) {
 				r = -EFAULT;
 				break;
@@ -386,10 +455,11 @@ static ssize_t adb_write(struct file *fp, const char __user *buf,
 			ret = usb_ep_queue(dev->ep_in, req, GFP_ATOMIC);
 			if (ret < 0) {
 				pr_debug("adb_write: xfer error %d\n", ret);
-				dev->error = 1;
+				atomic_set(&dev->error, 1);
 				r = -EIO;
 				break;
 			}
+			//wake_lock_timeout(&adb_idle_wake_lock, HZ / 2); // HT
 
 			buf += xfer;
 			count -= xfer;
@@ -419,7 +489,7 @@ static int adb_open(struct inode *ip, struct file *fp)
 	fp->private_data = _adb_dev;
 
 	/* clear the error latch */
-	_adb_dev->error = 0;
+	atomic_set(&_adb_dev->error, 0);
 
 	adb_ready_callback();
 
@@ -498,12 +568,14 @@ adb_function_unbind(struct usb_configuration *c, struct usb_function *f)
 	struct usb_request *req;
 
 
-	dev->online = 0;
-	dev->error = 1;
+	atomic_set(&dev->online, 0);
+	atomic_set(&dev->error, 1);
 
+	while ((req = adb_req_get(dev, &dev->rx_done)))
+		adb_request_free(req, dev->ep_out);
+	while ((req = adb_req_get(dev, &dev->rx_idle)))
+		adb_request_free(req, dev->ep_out);
 	wake_up(&dev->read_wq);
-
-	adb_request_free(dev->rx_req, dev->ep_out);
 	while ((req = adb_req_get(dev, &dev->tx_idle)))
 		adb_request_free(req, dev->ep_in);
 }
@@ -514,6 +586,7 @@ static int adb_function_set_alt(struct usb_function *f,
 	struct adb_dev	*dev = func_to_adb(f);
 	struct usb_composite_dev *cdev = f->config->cdev;
 	int ret;
+	struct usb_request *req;
 
 	DBG(cdev, "adb_function_set_alt intf: %d alt: %d\n", intf, alt);
 
@@ -534,7 +607,17 @@ static int adb_function_set_alt(struct usb_function *f,
 		usb_ep_disable(dev->ep_in);
 		return ret;
 	}
-	dev->online = 1;
+	if (cdev->gadget->speed == USB_SPEED_FULL)
+		dev->maxsize = 64;
+	else
+		dev->maxsize = 512;
+	printk(KERN_INFO "%s: maxsize = %d\n", __func__, dev->maxsize);
+
+	/* retire any completed rx requests from previous session */
+	while ((req = adb_req_get(dev, &dev->rx_done)))
+		adb_req_put(dev, &dev->rx_idle, req);
+
+	atomic_set(&dev->online, 1);
 
 	/* readers may be blocked waiting for us to go online */
 	wake_up(&dev->read_wq);
@@ -547,8 +630,9 @@ static void adb_function_disable(struct usb_function *f)
 	struct usb_composite_dev	*cdev = dev->cdev;
 
 	DBG(cdev, "adb_function_disable cdev %p\n", cdev);
-	dev->online = 0;
-	dev->error = 1;
+	atomic_set(&dev->online, 0);
+	atomic_set(&dev->error, 1);
+	dev->maxsize = 0;
 	usb_ep_disable(dev->ep_in);
 	usb_ep_disable(dev->ep_out);
 
@@ -572,6 +656,7 @@ static int adb_bind_config(struct usb_configuration *c)
 	dev->function.unbind = adb_function_unbind;
 	dev->function.set_alt = adb_function_set_alt;
 	dev->function.disable = adb_function_disable;
+	dev->maxsize = 512;
 
 	return usb_add_function(c, &dev->function);
 }
@@ -595,8 +680,11 @@ static int adb_setup(void)
 	atomic_set(&dev->write_excl, 0);
 
 	INIT_LIST_HEAD(&dev->tx_idle);
+	INIT_LIST_HEAD(&dev->rx_idle);
+	INIT_LIST_HEAD(&dev->rx_done);
 
 	_adb_dev = dev;
+	//wake_lock_init(&adb_idle_wake_lock, WAKE_LOCK_IDLE, "adb_idle_lock"); // HT
 
 	ret = misc_register(&adb_device);
 	if (ret)
@@ -617,3 +705,4 @@ static void adb_cleanup(void)
 	kfree(_adb_dev);
 	_adb_dev = NULL;
 }
+

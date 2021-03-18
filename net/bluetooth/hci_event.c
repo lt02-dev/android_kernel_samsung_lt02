@@ -1733,6 +1733,13 @@ static inline void hci_conn_complete_evt(struct hci_dev *hdev, struct sk_buff *s
 
 	conn = hci_conn_hash_lookup_ba(hdev, ev->link_type, &ev->bdaddr);
 	if (!conn) {
+		conn = hci_conn_add(hdev, ev->link_type, 0, &ev->bdaddr);
+		if (!conn) {
+			BT_ERR("No memory for the new connection");
+			goto unlock;
+		}
+		conn->state = BT_CONNECT;
+
 		if (ev->link_type != SCO_LINK)
 			goto unlock;
 
@@ -1771,10 +1778,11 @@ static inline void hci_conn_complete_evt(struct hci_dev *hdev, struct sk_buff *s
 		}
 
 		/* Set packet type for incoming connection */
-		if (!conn->out && hdev->hci_ver < BLUETOOTH_VER_2_0) {
+		if (!conn->out && (conn->type == ACL_LINK)) {
 			struct hci_cp_change_conn_ptype cp;
 			cp.handle = ev->handle;
-			cp.pkt_type = cpu_to_le16(conn->pkt_type);
+			cp.pkt_type = cpu_to_le16(conn->pkt_type
+							& ACL_PTYPE_MASK);
 			hci_send_cmd(hdev, HCI_OP_CHANGE_CONN_PTYPE, sizeof(cp),
 				     &cp);
 		}
@@ -1793,6 +1801,8 @@ static inline void hci_conn_complete_evt(struct hci_dev *hdev, struct sk_buff *s
 		hci_conn_del(conn);
 	} else if (ev->link_type != ACL_LINK)
 		hci_proto_connect_cfm(conn, ev->status);
+
+	mod_timer(&hdev->rs_timer, jiffies + msecs_to_jiffies(10*1000));
 
 unlock:
 	hci_dev_unlock(hdev);

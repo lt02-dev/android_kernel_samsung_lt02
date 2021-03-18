@@ -715,9 +715,11 @@ static void __enable_runtime(struct rq *rq)
 
 		raw_spin_lock(&rt_b->rt_runtime_lock);
 		raw_spin_lock(&rt_rq->rt_runtime_lock);
-		rt_rq->rt_runtime = rt_b->rt_runtime;
-		rt_rq->rt_time = 0;
-		rt_rq->rt_throttled = 0;
+		if (rt_rq->rt_runtime == RUNTIME_INF) {
+			rt_rq->rt_runtime = rt_b->rt_runtime;
+			rt_rq->rt_time = 0;
+			rt_rq->rt_throttled = 0;
+		}
 		raw_spin_unlock(&rt_rq->rt_runtime_lock);
 		raw_spin_unlock(&rt_b->rt_runtime_lock);
 	}

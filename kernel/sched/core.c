@@ -2111,6 +2111,14 @@ unsigned long nr_running(void)
 	return sum;
 }
 
+unsigned long get_cpu_nr_running(unsigned int cpu)
+{
+	if (cpu < num_possible_cpus())
+		return cpu_rq(cpu)->nr_running;
+	else
+		return 0;
+}
+
 unsigned long nr_uninterruptible(void)
 {
 	unsigned long i, sum = 0;
@@ -2161,6 +2169,13 @@ unsigned long this_cpu_load(void)
 	return this->cpu_load[0];
 }
 
+#ifdef CONFIG_RUNTIME_COMPCACHE
+unsigned long this_cpu_loadx(int i)
+{
+	struct rq *this = this_rq();
+	return this->cpu_load[i];
+}
+#endif /* CONFIG_RUNTIME_COMPCACHE */
 
 /* Variables and functions for calc_load */
 static atomic_long_t calc_load_tasks;

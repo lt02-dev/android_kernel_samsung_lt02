@@ -1093,7 +1093,10 @@ mtp_function_bind(struct usb_configuration *c, struct usb_function *f)
 	id = usb_interface_id(c, f);
 	if (id < 0)
 		return id;
-	mtp_interface_desc.bInterfaceNumber = id;
+	if (!strcmp(f->name, "mtp"))
+		mtp_interface_desc.bInterfaceNumber = id;
+	else
+		ptp_interface_desc.bInterfaceNumber = id;
 
 	/* allocate endpoints */
 	ret = mtp_create_bulk_endpoints(dev, &mtp_fullspeed_in_desc,
@@ -1212,6 +1215,7 @@ static int mtp_bind_config(struct usb_configuration *c, bool ptp_config)
 	dev->function.name = "mtp";
 	dev->function.strings = mtp_strings;
 	if (ptp_config) {
+		dev->function.name = "ptp";
 		dev->function.descriptors = fs_ptp_descs;
 		dev->function.hs_descriptors = hs_ptp_descs;
 	} else {

@@ -1092,18 +1092,13 @@ static void iface_stat_create(struct net_device *net_dev,
 	spin_lock_bh(&iface_stat_list_lock);
 	entry = get_iface_entry(ifname);
 	if (entry != NULL) {
-		bool activate = !ipv4_is_loopback(ipaddr);
 		IF_DEBUG("qtaguid: iface_stat: create(%s): entry=%p\n",
 			 ifname, entry);
 		iface_check_stats_reset_and_adjust(net_dev, entry);
-		_iface_stat_set_active(entry, net_dev, activate);
+		_iface_stat_set_active(entry, net_dev, true);
 		IF_DEBUG("qtaguid: %s(%s): "
 			 "tracking now %d on ip=%pI4\n", __func__,
-			 entry->ifname, activate, &ipaddr);
-		goto done_unlock_put;
-	} else if (ipv4_is_loopback(ipaddr)) {
-		IF_DEBUG("qtaguid: iface_stat: create(%s): "
-			 "ignore loopback dev. ip=%pI4\n", ifname, &ipaddr);
+			 entry->ifname, true, &ipaddr);
 		goto done_unlock_put;
 	}
 
@@ -2588,8 +2583,9 @@ static int pp_stats_line(struct proc_print_info *ppi, int cnt_set)
 	} else {
 		tag_t tag = ppi->ts_entry->tn.tag;
 		uid_t stat_uid = get_uid_from_tag(tag);
-
-		if (!can_read_other_uid_stats(stat_uid)) {
+		/* Detailed tags are not available to everybody */
+		if (get_atag_from_tag(tag)
+		    && !can_read_other_uid_stats(stat_uid)) {
 			CT_DEBUG("qtaguid: stats line: "
 				 "%s 0x%llx %u: insufficient priv "
 				 "from pid=%u tgid=%u uid=%u\n",

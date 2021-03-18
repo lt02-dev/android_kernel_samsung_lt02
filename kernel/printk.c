@@ -157,6 +157,26 @@ static int log_buf_len = __LOG_BUF_LEN;
 static unsigned logged_chars; /* Number of chars produced since last read+clear operation */
 static int saved_console_loglevel = -1;
 
+/* Mark for GetLog */
+#ifdef CONFIG_KERNEL_DEBUG_SEC
+struct struct_kernel_log_mark {
+	u32 special_mark_1;
+	u32 special_mark_2;
+	u32 special_mark_3;
+	u32 special_mark_4;
+	void *p__log_buf;
+};
+
+static struct struct_kernel_log_mark kernel_log_mark = {
+	.special_mark_1 = (('*' << 24) | ('^' << 16) | ('^' << 8) | ('*' << 0)),
+	.special_mark_2 = (('I' << 24) | ('n' << 16) | ('f' << 8) | ('o' << 0)),
+	.special_mark_3 = (('H' << 24) | ('e' << 16) | ('r' << 8) | ('e' << 0)),
+	.special_mark_4 = (('k' << 24) | ('l' << 16) | ('o' << 8) | ('g' << 0)),
+	.p__log_buf = __log_buf,
+
+};
+#endif
+
 #ifdef CONFIG_KEXEC
 /*
  * This appends the listed symbols to /proc/vmcoreinfo
@@ -242,6 +262,14 @@ void __init setup_log_buf(int early)
 	pr_info("log_buf_len: %d\n", log_buf_len);
 	pr_info("early log buf free: %d(%d%%)\n",
 		free, (free * 100) / __LOG_BUF_LEN);
+
+/* Mark for GetLog */
+#ifdef CONFIG_KERNEL_DEBUG_SEC
+		//{{Mark for GetLog -2/2
+		kernel_log_mark.p__log_buf = __log_buf;
+		//}} Mark for GetLog -2/2
+#endif /* CONFIG_SAMSUNG_USE_GETLOG */
+
 }
 
 #ifdef CONFIG_BOOT_PRINTK_DELAY
@@ -761,6 +789,27 @@ module_param_named(time, printk_time, bool, S_IRUGO | S_IWUSR);
 static bool always_kmsg_dump;
 module_param_named(always_kmsg_dump, always_kmsg_dump, bool, S_IRUGO | S_IWUSR);
 
+#if defined(CONFIG_PRINTK_CPU_ID)
+static int printk_cpu_id = 1;
+#else
+static int printk_cpu_id = 0;
+#endif
+module_param_named(cpu, printk_cpu_id, bool, S_IRUGO | S_IWUSR);
+
+#if defined(CONFIG_PRINTK_PID)
+static int printk_pid = 1;
+#else
+static int printk_pid = 0;
+#endif
+module_param_named(pid, printk_pid, bool, S_IRUGO | S_IWUSR);
+
+#if defined(CONFIG_PRINTK_COMM)
+static int printk_comm = 1;
+#else
+static int printk_comm = 0;
+#endif
+module_param_named(comm, printk_comm, bool, S_IRUGO | S_IWUSR);
+
 /* Check if we have any console registered that can be called early in boot. */
 static int have_callable_console(void)
 {
@@ -936,7 +985,8 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 				  sizeof(printk_buf) - printed_len, fmt, args);
 
 #ifdef	CONFIG_DEBUG_LL
-	printascii(printk_buf);
+	if (console_drivers == NULL)
+		printascii(printk_buf);
 #endif
 
 	p = printk_buf;
@@ -995,6 +1045,40 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 				tlen = sprintf(tbuf, "[%5lu.%06lu] ",
 						(unsigned long) t,
 						nanosec_rem / 1000);
+
+				for (tp = tbuf; tp < tbuf + tlen; tp++)
+					emit_log_char(*tp);
+				printed_len += tlen;
+			}
+
+			if (printk_cpu_id) {
+				/* Add the cpu id */
+				char tbuf[10], *tp;
+				unsigned tlen;
+
+				tlen = sprintf(tbuf, "c%u ", printk_cpu);
+
+				for (tp = tbuf; tp < tbuf + tlen; tp++)
+					emit_log_char(*tp);
+				printed_len += tlen;
+			}
+			if (printk_pid) {
+				/* Add the current process id */
+				char tbuf[10], *tp;
+				unsigned tlen;
+
+				tlen = sprintf(tbuf, "%6u ", current->pid);
+
+				for (tp = tbuf; tp < tbuf + tlen; tp++)
+					emit_log_char(*tp);
+				printed_len += tlen;
+			}
+			if (printk_comm) {
+				/* Add the current process comm */
+				char tbuf[20]={0,}, *tp;
+				unsigned tlen;
+
+				tlen = snprintf(tbuf, sizeof(tbuf), "%s ", current->comm);
 
 				for (tp = tbuf; tp < tbuf + tlen; tp++)
 					emit_log_char(*tp);

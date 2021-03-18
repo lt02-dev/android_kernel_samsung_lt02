@@ -12,6 +12,7 @@
 #include <linux/err.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
+#include <linux/pm_wakeup.h>
 
 #include <linux/mmc/host.h>
 #include <linux/mmc/card.h>
@@ -223,6 +224,12 @@ static int sdio_enable_wide(struct mmc_card *card)
 	if (ret)
 		return ret;
 
+	if ((ctrl & SDIO_BUS_WIDTH_MASK) == SDIO_BUS_WIDTH_RESERVED)
+		pr_warning("%s: SDIO_CCCR_IF is invalid: 0x%02x\n",
+			   mmc_hostname(card->host), ctrl);
+
+	/* set as 4-bit bus width */
+	ctrl &= ~SDIO_BUS_WIDTH_MASK;
 	ctrl |= SDIO_BUS_WIDTH_4BIT;
 
 	ret = mmc_io_rw_direct(card, 1, 0, SDIO_CCCR_IF, ctrl, NULL);
@@ -590,12 +597,14 @@ static int mmc_sdio_init_card(struct mmc_host *host, u32 ocr,
 	 * Inform the card of the voltage
 	 */
 	if (!powered_resume) {
-		/* The initialization should be done at 3.3 V I/O voltage. */
-		mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_330, 0);
-
 		err = mmc_send_io_op_cond(host, host->ocr, &ocr);
 		if (err)
 			goto err;
+		if (oldcard) {
+			host->ocr = mmc_select_voltage(host, ocr & ~0x7F);
+			if (!host->ocr)
+				return -EINVAL;
+		}
 	}
 
 	/*
@@ -905,6 +914,16 @@ out:
 	}
 }
 
+void mmc_sdio_irq_wakeup(struct mmc_host *host)
+{
+	int sec = 3;
+
+	/* FixMe: modify it if have better solution */
+	pr_warning("%s: hold 3 S to prevent suspend\n",
+		       mmc_hostname(host));
+	pm_wakeup_event(mmc_dev(host), 1000 * sec);
+}
+
 /*
  * SDIO suspend.  We need to suspend all functions separately.
  * Therefore all registered functions must have drivers with suspend
@@ -914,8 +933,17 @@ static int mmc_sdio_suspend(struct mmc_host *host)
 {
 	int i, err = 0;
 
+	host->break_suspend = 0;
 	for (i = 0; i < host->card->sdio_funcs; i++) {
 		struct sdio_func *func = host->card->sdio_func[i];
+
+		/* cancel suspend if any sdio_func has IRQ after suspended */
+		if (host->break_suspend) {
+			host->break_suspend = 0;
+			err = -EBUSY;
+			break;
+		}
+
 		if (func && sdio_func_present(func) && func->dev.driver) {
 			const struct dev_pm_ops *pmops = func->dev.driver->pm;
 			if (!pmops || !pmops->suspend || !pmops->resume) {
@@ -923,15 +951,21 @@ static int mmc_sdio_suspend(struct mmc_host *host)
 				err = -ENOSYS;
 			} else
 				err = pmops->suspend(&func->dev);
+
 			if (err)
 				break;
+			else
+				func->func_status = func_suspended;
 		}
 	}
+
 	while (err && --i >= 0) {
 		struct sdio_func *func = host->card->sdio_func[i];
 		if (func && sdio_func_present(func) && func->dev.driver) {
 			const struct dev_pm_ops *pmops = func->dev.driver->pm;
+			func->func_status = func_resuming;
 			pmops->resume(&func->dev);
+			func->func_status = func_resumed;
 		}
 	}
 
@@ -939,6 +973,33 @@ static int mmc_sdio_suspend(struct mmc_host *host)
 		mmc_claim_host(host);
 		sdio_disable_wide(host->card);
 		mmc_release_host(host);
+	}
+
+	/*
+	* if SDIO card interrupt is used as wake up source, it should not
+	* disable in suspend, so INT may happen after host has suspended
+	*
+	* Here suspend function claim the bus, and it will be released in resume
+	* funciton untill host and card are both ready for R/W
+	* so INT thread will not run untill it is safe
+	*/
+	if (!err && device_may_wakeup(mmc_dev(host))) {
+		/*
+		 * use "irq_wakeup" to notify that if irq happens again
+		 * use mmc_sdio_irq_wakeup to prevent suspend
+		 */
+		host->irq_wakeup = 1;
+
+		mmc_claim_host(host);
+
+		/*
+		 * Use "break_suspend" to double check whether sdio IRQ happens
+		 * if so, use mmc_sdio_irq_wakeup to prevent suspend
+		 */
+		if (host->break_suspend) {
+			host->break_suspend = 0;
+			mmc_sdio_irq_wakeup(host);
+		}
 	}
 
 	return err;
@@ -951,8 +1012,15 @@ static int mmc_sdio_resume(struct mmc_host *host)
 	BUG_ON(!host);
 	BUG_ON(!host->card);
 
-	/* Basic card reinitialization. */
-	mmc_claim_host(host);
+	/*
+	* Basic card reinitialization.
+	*
+	* if SDIO card interrupt used as wake up source, and the bus is not
+	* released in mmc_sdio_suspend
+	* so it it not need to claim the bus again here
+	*/
+	if (!device_may_wakeup(mmc_dev(host)))
+		mmc_claim_host(host);
 
 	/* No need to reinitialize powered-resumed nonremovable cards */
 	if (mmc_card_is_removable(host) || !mmc_card_keep_power(host))
@@ -969,6 +1037,8 @@ static int mmc_sdio_resume(struct mmc_host *host)
 
 	if (!err && host->sdio_irqs)
 		wake_up_process(host->sdio_irq_thread);
+
+	host->irq_wakeup = 0;
 	mmc_release_host(host);
 
 	/*
@@ -984,8 +1054,11 @@ static int mmc_sdio_resume(struct mmc_host *host)
 	for (i = 0; !err && i < host->card->sdio_funcs; i++) {
 		struct sdio_func *func = host->card->sdio_func[i];
 		if (func && sdio_func_present(func) && func->dev.driver) {
+
 			const struct dev_pm_ops *pmops = func->dev.driver->pm;
+			func->func_status = func_resuming;
 			err = pmops->resume(&func->dev);
+			func->func_status = func_resumed;
 		}
 	}
 
@@ -1020,10 +1093,6 @@ static int mmc_sdio_power_restore(struct mmc_host *host)
 	 * With these steps taken, mmc_select_voltage() is also required to
 	 * restore the correct voltage setting of the card.
 	 */
-
-	/* The initialization should be done at 3.3 V I/O voltage. */
-	if (!mmc_card_keep_power(host))
-		mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_330, 0);
 
 	sdio_reset(host);
 	mmc_go_idle(host);
@@ -1245,46 +1314,8 @@ int sdio_reset_comm(struct mmc_card *card)
 		goto err;
 	}
 
-	err = mmc_send_io_op_cond(host, host->ocr, &ocr);
+	err = mmc_sdio_init_card(host, host->ocr, card, 0);
 	if (err)
-		goto err;
-
-	if (mmc_host_is_spi(host)) {
-		err = mmc_spi_set_crc(host, use_spi_crc);
-		if (err)
-			goto err;
-	}
-
-	if (!mmc_host_is_spi(host)) {
-		err = mmc_send_relative_addr(host, &card->rca);
-		if (err)
-			goto err;
-		mmc_set_bus_mode(host, MMC_BUSMODE_PUSHPULL);
-	}
-	if (!mmc_host_is_spi(host)) {
-		err = mmc_select_card(card);
-		if (err)
-			goto err;
-	}
-
-	/*
-	 * Switch to high-speed (if supported).
-	 */
-	err = sdio_enable_hs(card);
-	if (err > 0)
-		mmc_sd_go_highspeed(card);
-	else if (err)
-		goto err;
-
-	/*
-	 * Change to the card's maximum speed.
-	 */
-	mmc_set_clock(host, mmc_sdio_get_max_clock(card));
-
-	err = sdio_enable_4bit_bus(card);
-	if (err > 0)
-		mmc_set_bus_width(host, MMC_BUS_WIDTH_4);
-	else if (err)
 		goto err;
 
 	mmc_release_host(host);
